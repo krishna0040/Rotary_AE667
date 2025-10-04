@@ -172,7 +172,7 @@ class rotor:
 
     def calculate_glauert_lambda(self, mu, alpha_tpp, CT, tol=1e-6, max_iter=100):
         """
-        Keep your Glauert iteration - unchanged except return doc clarity.
+        Keep Glauert iteration - unchanged except return doc clarity.
         """
         lambda_G = mu * np.tan(alpha_tpp) / 2  # initial guess
         for i in range(max_iter):

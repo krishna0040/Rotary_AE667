@@ -170,119 +170,158 @@ class rotor:
         total = np.trapz(integral_over_psi, x=r)
         return total
 
-    def calculate_glauert_lambda(self, mu, alpha_tpp, CT, tol=1e-6, max_iter=100):
+    def calculate_glauert_lambda(self, mu, alpha_tpp, CT, tol=1e-8, max_iter=100):
         """
-        Keep Glauert iteration - unchanged except return doc clarity.
+        Solve the Glauert momentum relation for the total nondimensional inflow
+        lambda = lambda_G (mean inflow) and return (lambda_G, lambda_iG).
+        We solve: CT = 2 * lambda * sqrt(mu^2 + lambda^2).
+        lambda_c = V*sin(alpha_tpp)/(Omega*R) must be included afterwards:
+        lambda_iG = lambda_G - lambda_c
+
+        Inputs:
+        mu: advance ratio = V / (Omega*R) (note: cos/sin of alpha_tpp affects definition of mu in other conventions)
+        alpha_tpp: tip-path plane (rad) (positive nose-up)
+        CT: thrust coefficient (nondim)
+        Returns:
+        lambda_G: total nondimensional inflow (lambda = lambda_c + lambda_i)
+        lambda_iG: induced part = lambda_G - lambda_c
         """
-        lambda_G = mu * np.tan(alpha_tpp) / 2  # initial guess
-        for i in range(max_iter):
-            denominator = np.sqrt(mu**2 + lambda_G**2)
-            lambda_G_new = mu * np.tan(alpha_tpp) / 2 + CT / (2 * denominator)
-            if abs(lambda_G_new - lambda_G) < tol:
-                lambda_G = lambda_G_new
+        lambda_c = mu * np.tan(alpha_tpp)  # IF you define mu = V cos(alpha)/OmegaR and lambda_c = V sin(alpha)/OmegaR
+        # lambda_c = (V * np.sin(alpha_tpp)) / (self.omega * self.r)
+
+        # initial guess: hover-like or small-mu guess
+        lam = max(CT / 2.0, 1e-6)
+        for _ in range(max_iter):
+            f = 2.0 * lam * np.sqrt(mu * mu + lam * lam) - CT
+            # df/dlam (derivative) for Newton:
+            df = 2.0 * np.sqrt(mu * mu + lam * lam) + 2.0 * lam * (lam / np.sqrt(mu * mu + lam * lam))
+            lam_new = lam - f / df
+            if abs(lam_new - lam) < tol:
+                lam = lam_new
                 break
-            lambda_G = lambda_G_new
-        lambda_iG = lambda_G - mu * np.sin(alpha_tpp)
+            lam = lam_new
+        # compute induced portion
+        lambda_G = lam
+        # compute lambda_c robustly if user stored forward_speed somewhere:
+        # If you have forward_speed V and omega,r available compute:
+        # lambda_c = (V * np.sin(alpha_tpp)) / (self.omega * self.r)
+        # Here we assume caller will compute lambda_c consistently; compute a safe fallback:
+        lambda_c_fallback = mu * np.tan(alpha_tpp)  # keep previous relation as fallback
+        lambda_iG = lambda_G - lambda_c_fallback
         return lambda_G, lambda_iG
+
 
     def calculate_non_uniform_inflow(self, r, psi, mu, lambda_G, lambda_iG):
         """
-        Build full (r,psi) distribution of induced inflow.
-        r is radial array (dimensional), psi is azimuth array.
-        Note: use non-dimensional radius for R_grid in factor if desired.
+        r: 1D array (dimensional radius values)
+        psi: 1D array (azimuth)
+        mu: advance ratio (dimensionless)
+        lambda_G: mean total inflow (dimensionless)
+        lambda_iG: mean induced inflow (dimensionless)
+        returns lambda_i(r,psi) (dimensionless)
         """
         R_nd, PSI_grid = np.meshgrid(r / self.r, psi, indexing='ij')  # nondim radius
-        inflow_factor = (1 + ((4.0/3.0) * (mu / lambda_G))**1.2 + mu / lambda_G)
-        # distribution has sign cos(psi) (longitudinal asymmetry)
-        lambda_i = lambda_iG * inflow_factor * R_nd * np.cos(PSI_grid)
-        # convert to dimensional induced velocity if you want: lambda_i * omega * r
+        # compute the coefficient safely (avoid div by zero)
+        eps = 1e-12
+        ratio = mu / (lambda_G + eps)
+        coeff = (4.0/3.0) * ratio / (1.2 + ratio)
+        lambda_i = lambda_iG * (1.0 + coeff * R_nd * np.cos(PSI_grid))
         return lambda_i
+
     
     def calculate_flapping_angles(self, theta0, theta1c, theta1s, mu, alpha_tpp):
         """
-        @brief Calculate flapping angles beta0, beta1c, beta1s
+        Approximate first-harmonic flapping (quasi-steady).  IMPORTANT: this is a
+        simple engineering approximation; for high fidelity replace with solving
+        blade moment equilibrium including Lock number, blade flapping stiffness, and aerodynamic moments.
         """
-        # Simplified flapping calculations (from blade dynamics)
-        beta0 = theta0 / 8  # Coning angle approximation
-        beta1c = (theta1s - mu * alpha_tpp) / (1 - mu**2/2)  # Longitudinal flapping
-        beta1s = -(theta1c + mu * theta0/8) / (1 + mu**2/2)  # Lateral flapping
-        
+        # small-angle heuristic:
+        beta0 = 0.125 * theta0        # keep theta0/8 but document it as heuristic
+        # longitudinal harmonic: make theta1s (longitudinal cyclic) drive beta1c
+        beta1c = 0.5 * theta1s - 0.2 * mu * theta0
+        # lateral harmonic: make theta1c (lateral cyclic) drive beta1s
+        beta1s = -0.5 * theta1c - 0.2 * mu * theta0
         return beta0, beta1c, beta1s
 
     def forward(self, forward_speed, theta0, theta1c, theta1s, alpha_tpp,
                 CT_guess=0.008, n_r=100, n_psi=100, tol_CT=1e-5, max_iter=50):
-        
-        # discretization
+        """
+        Main forward-flight solver (Blade Element + Momentum coupling)
+        Computes forces/moments per rotor and total.
+        """
+        # Discretization
         r = np.linspace(self.rc, self.r - 1e-6, n_r)
         psi = np.linspace(0.0, 2.0 * np.pi, n_psi, endpoint=False)
-    
-        mu = forward_speed / (self.omega * self.r)  # dimensionless advance ratio
-    
-        # iterate for CT
+
+        mu = forward_speed / (self.omega * self.r)  # advance ratio
+
         CT = CT_guess
-        for iteration in range(max_iter):
-            # Glauert inflow
+        for _ in range(max_iter):
+            # --- Step 1: Inflow iteration ---
             lambda_G, lambda_iG = self.calculate_glauert_lambda(mu, alpha_tpp, CT)
-    
-            # flapping angles
+
+            # --- Step 2: Flapping angles ---
             beta0, beta1c, beta1s = self.calculate_flapping_angles(theta0, theta1c, theta1s, mu, alpha_tpp)
-    
-            # lambda_i distribution
+
+            # --- Step 3: Local inflow distribution ---
             lambda_i = self.calculate_non_uniform_inflow(r, psi, mu, lambda_G, lambda_iG)
-    
-            # meshes
+
+            # --- Step 4: Local velocities ---
             R_grid, PSI_grid = np.meshgrid(r, psi, indexing='ij')
-    
-            # velocities
-            UT = self.omega * R_grid + forward_speed * np.sin(PSI_grid)
+            UT = self.omega * R_grid + forward_speed * np.sin(PSI_grid)  # tangential component
             beta_dot = self.omega * (-beta1c * np.sin(PSI_grid) + beta1s * np.cos(PSI_grid))
-            UP = (lambda_i * self.omega * self.r +
-                  forward_speed * np.cos(PSI_grid) * np.cos(alpha_tpp) +
-                  R_grid * beta_dot +
-                  forward_speed * np.sin(beta0) * np.cos(PSI_grid))
-    
+            UP = (lambda_i * self.omega * self.r
+                  + forward_speed * np.cos(PSI_grid) * np.cos(alpha_tpp)
+                  + R_grid * beta_dot
+                  + forward_speed * np.sin(alpha_tpp) * np.sin(PSI_grid))
+
+            # --- Step 5: Flow angles ---
+            phi = np.arctan2(UP, UT)  # inflow angle (positive nose-up)
             U_total = np.sqrt(UT**2 + UP**2)
-            phi = np.arctan2(UP, UT)
-    
+
+            # --- Step 6: Sectional aerodynamic angles ---
             twist_grid = np.array([self.cal_twist(rv) for rv in r])[:, np.newaxis]
             theta_total = theta0 + theta1c * np.cos(PSI_grid) + theta1s * np.sin(PSI_grid) + twist_grid
-            alpha = theta_total - phi
-    
+            alpha = theta_total - phi  # angle of attack
+
+            # --- Step 7: Aerodynamic coefficients ---
             cl = self.cal_cl(alpha)
             cd = self.cal_cd(alpha)
             chord_grid = np.array([self.cal_chord(rv) for rv in r])[:, np.newaxis]
-    
-            dL = 0.5 * self.rho * U_total**2 * chord_grid * cl
-            dD = 0.5 * self.rho * U_total**2 * chord_grid * cd
-    
-            dT = dL * np.cos(phi) - dD * np.sin(phi)
-            dH = dL * np.sin(phi) + dD * np.cos(phi)
-            dY = dD * np.sin(PSI_grid)
-    
-            # integrate
+
+            # --- Step 8: Differential forces per element ---
+            q = 0.5 * self.rho * U_total**2
+            dL = q * chord_grid * cl
+            dD = q * chord_grid * cd
+
+            # Resolve into thrust (perpendicular to disk), in-plane drag (H), and side force (Y)
+            dT = dL * np.cos(phi) - dD * np.sin(phi)  # thrust component
+            dH = dL * np.sin(phi) + dD * np.cos(phi)  # in-plane horizontal
+            dY = dD * np.sin(PSI_grid)                # side force (due to drag)
+
+            # --- Step 9: Integrate to total blade loads ---
             T_blade = self.integrate_2d(r, psi, dT)
-    
-            # update CT
+            H_blade = self.integrate_2d(r, psi, dH)
+            Y_blade = self.integrate_2d(r, psi, dY)
+            Q_blade = self.integrate_2d(r, psi, R_grid * dD)  # torque from drag
+            Mx_blade = self.integrate_2d(r, psi, R_grid * dT * np.sin(PSI_grid))
+            My_blade = self.integrate_2d(r, psi, R_grid * dT * np.cos(PSI_grid))
+
+            # --- Step 10: Update thrust coefficient ---
             CT_new = T_blade / (self.rho * np.pi * self.r**2 * (self.omega * self.r)**2)
             if abs(CT_new - CT) < tol_CT:
                 CT = CT_new
                 break
             CT = CT_new
-    
-        # After convergence, compute all final forces/moments
-        Q_blade = self.integrate_2d(r, psi, R_grid * dD)
-        Mx_blade = self.integrate_2d(r, psi, R_grid * dT * np.sin(PSI_grid))
-        My_blade = self.integrate_2d(r, psi, R_grid * dT * np.cos(PSI_grid))
-        H_blade = self.integrate_2d(r, psi, dH)
-        Y_blade = self.integrate_2d(r, psi, dY)
-    
+
+        # --- Step 11: Assemble outputs ---
         forces_moments = {
-            'FZ': self.b * T_blade,
-            'FX': -self.b * H_blade,
-            'FY': -self.b * Y_blade,
-            'MX': self.b * Mx_blade,
-            'MY': self.b * My_blade,
-            'MZ': self.b * Q_blade,
+            'FZ': self.b * T_blade,              # Thrust (positive up if Z down)
+            'FX': -self.b * H_blade,             # Longitudinal (drag)
+            'FY': -self.b * Y_blade,             # Lateral (side force)
+            'MX': self.b * Mx_blade,             # Rolling moment
+            'MY': self.b * My_blade,             # Pitching moment
+            'MZ': self.b * Q_blade,              # Torque about shaft
             'power': self.b * Q_blade * self.omega,
             'mu': mu,
             'lambda_G': lambda_G,
@@ -293,8 +332,97 @@ class rotor:
             'beta1s': beta1s,
             'CT': CT
         }
-    
+
         return forces_moments, R_grid, PSI_grid, alpha, dT, dH, dY
+
+
+
+    # def forward(self, forward_speed, theta0, theta1c, theta1s, alpha_tpp,
+    #             CT_guess=0.008, n_r=100, n_psi=100, tol_CT=1e-5, max_iter=50):
+        
+    #     # discretization
+    #     r = np.linspace(self.rc, self.r - 1e-6, n_r)
+    #     psi = np.linspace(0.0, 2.0 * np.pi, n_psi, endpoint=False)
+    
+    #     mu = forward_speed / (self.omega * self.r)  # dimensionless advance ratio
+    
+    #     # iterate for CT
+    #     CT = CT_guess
+    #     for iteration in range(max_iter):
+    #         # Glauert inflow
+    #         lambda_G, lambda_iG = self.calculate_glauert_lambda(mu, alpha_tpp, CT)
+    
+    #         # flapping angles
+    #         beta0, beta1c, beta1s = self.calculate_flapping_angles(theta0, theta1c, theta1s, mu, alpha_tpp)
+    
+    #         # lambda_i distribution
+    #         lambda_i = self.calculate_non_uniform_inflow(r, psi, mu, lambda_G, lambda_iG)
+    
+    #         # meshes
+    #         R_grid, PSI_grid = np.meshgrid(r, psi, indexing='ij')
+    
+    #         # velocities
+    #         UT = self.omega * R_grid + forward_speed * np.sin(PSI_grid)
+    #         beta_dot = self.omega * (-beta1c * np.sin(PSI_grid) + beta1s * np.cos(PSI_grid))
+    #         UP = (lambda_i * self.omega * self.r +
+    #               forward_speed * np.cos(PSI_grid) * np.cos(alpha_tpp) +
+    #               R_grid * beta_dot +
+    #               forward_speed * np.sin(beta0) * np.cos(PSI_grid))
+    
+    #         U_total = np.sqrt(UT**2 + UP**2)
+    #         phi = np.arctan2(UP, UT)
+    
+    #         twist_grid = np.array([self.cal_twist(rv) for rv in r])[:, np.newaxis]
+    #         theta_total = theta0 + theta1c * np.cos(PSI_grid) + theta1s * np.sin(PSI_grid) + twist_grid
+    #         alpha = theta_total - phi
+    
+    #         cl = self.cal_cl(alpha)
+    #         cd = self.cal_cd(alpha)
+    #         chord_grid = np.array([self.cal_chord(rv) for rv in r])[:, np.newaxis]
+    
+    #         dL = 0.5 * self.rho * U_total**2 * chord_grid * cl
+    #         dD = 0.5 * self.rho * U_total**2 * chord_grid * cd
+    
+    #         dT = dL * np.cos(phi) - dD * np.sin(phi)
+    #         dH = dL * np.sin(phi) + dD * np.cos(phi)
+    #         dY = dD * np.sin(PSI_grid)
+    
+    #         # integrate
+    #         T_blade = self.integrate_2d(r, psi, dT)
+    
+    #         # update CT
+    #         CT_new = T_blade / (self.rho * np.pi * self.r**2 * (self.omega * self.r)**2)
+    #         if abs(CT_new - CT) < tol_CT:
+    #             CT = CT_new
+    #             break
+    #         CT = CT_new
+    
+    #     # After convergence, compute all final forces/moments
+    #     Q_blade = self.integrate_2d(r, psi, R_grid * dD)
+    #     Mx_blade = self.integrate_2d(r, psi, R_grid * dT * np.sin(PSI_grid))
+    #     My_blade = self.integrate_2d(r, psi, R_grid * dT * np.cos(PSI_grid))
+    #     H_blade = self.integrate_2d(r, psi, dH)
+    #     Y_blade = self.integrate_2d(r, psi, dY)
+    
+    #     forces_moments = {
+    #         'FZ': self.b * T_blade,
+    #         'FX': -self.b * H_blade,
+    #         'FY': -self.b * Y_blade,
+    #         'MX': self.b * Mx_blade,
+    #         'MY': self.b * My_blade,
+    #         'MZ': self.b * Q_blade,
+    #         'power': self.b * Q_blade * self.omega,
+    #         'mu': mu,
+    #         'lambda_G': lambda_G,
+    #         'lambda_iG': lambda_iG,
+    #         'lambda_i_distribution': lambda_i,
+    #         'beta0': beta0,
+    #         'beta1c': beta1c,
+    #         'beta1s': beta1s,
+    #         'CT': CT
+    #     }
+    
+    #     return forces_moments, R_grid, PSI_grid, alpha, dT, dH, dY
 
 
 

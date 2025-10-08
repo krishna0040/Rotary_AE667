@@ -316,7 +316,7 @@ class rotor:
 
         # --- Step 11: Assemble outputs ---
         forces_moments = {
-            'FZ': self.b * T_blade,              # Thrust (positive up if Z down)
+            'FZ': -self.b * T_blade,              # Thrust (positive up if Z down)
             'FX': -self.b * H_blade,             # Longitudinal (drag)
             'FY': -self.b * Y_blade,             # Lateral (side force)
             'MX': self.b * Mx_blade,             # Rolling moment

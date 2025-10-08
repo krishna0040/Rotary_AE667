@@ -88,3 +88,74 @@ class MissionPlanner:
         print("\n--- Mission Summary ---")
         for log in self.mission_log:
             print(log)
+
+    def helicopter_performance(x, weight, fuel_weight, eta_p=0.8, P_avail=745.7*8000):
+        """
+        Compute stall-limited, power-limited, range-max, and endurance-max speeds and outputs.
+
+        Parameters
+        ----------
+        x : rotor() instance
+            Rotor class with thrust_power(V, alpha) defined.
+        weight : float
+            Gross weight of helicopter [N].
+        fuel_weight : float
+            Fuel weight [kg].
+        eta_p : float
+            Propulsive efficiency (default 0.8)
+        P_avail : float
+            Available engine power [W].
+
+        Returns
+        -------
+        dict with:
+        V_stall : m/s
+        V_max_power : m/s
+        range_max : km
+        endurance_max : hr
+        """
+        rho = x.rho
+        A = np.pi * x.radius**2
+
+        alpha_stall = np.deg2rad(18)
+        mu_values = np.linspace(0.01, 0.4, 100)
+        V_values = mu_values * x.omega * x.radius
+
+        alpha_values = []
+        for mu in mu_values:
+            _, _, _, _, _, _, _, alpha_tpp, _, _ = x.thrust_power(mu)
+            alpha_values.append(alpha_tpp)
+        alpha_values = np.array(alpha_values)
+
+        # find where stall reached
+        stall_idx = np.where(alpha_values >= alpha_stall)[0]
+        if len(stall_idx) > 0:
+            V_stall = V_values[stall_idx[0]]
+        else:
+            V_stall = V_values[-1]
+
+        def power_required(V):
+            T, P = x.thrust_power(V / (x.omega * x.radius))
+            return P
+
+        V_test = np.linspace(0, 120, 300)
+        P_req = np.array([power_required(V) for V in V_test])
+        idx = np.where(P_req < P_avail)[0]
+        V_max_power = V_test[idx[-1]] if len(idx) > 0 else 0
+
+        # Range ∝ η * (W_fuel/W) * (L/D)_max
+        # Approx: (L/D)_max ≈ (T/W) at minimum power required
+        i_min = np.argmin(P_req)
+        T_min, P_min = x.thrust_power(V_test[i_min] / (x.omega * x.radius))
+        LD_max = T_min / weight
+        range_max = eta_p * (fuel_weight * 9.81 / weight) * LD_max * 3.6e3  # m → km
+
+        # Endurance ∝ (η / P_min) * (W_fuel)
+        endurance_max = eta_p * (fuel_weight * 9.81) / P_min / 3600  # sec → hr
+
+        return {
+            "V_stall": V_stall,
+            "V_max_power": V_max_power,
+            "range_max": range_max,
+            "endurance_max": endurance_max
+        }

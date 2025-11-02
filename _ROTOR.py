@@ -316,7 +316,7 @@ class rotor:
 
         # --- Step 11: Assemble outputs ---
         forces_moments = {
-            'FZ': -self.b * T_blade,              # Thrust (positive up if Z down)
+            'FZ': -self.b * T_blade,             # Thrust (positive up if Z down)
             'FX': -self.b * H_blade,             # Longitudinal (drag)
             'FY': -self.b * Y_blade,             # Lateral (side force)
             'MX': self.b * Mx_blade,             # Rolling moment
@@ -334,95 +334,5 @@ class rotor:
         }
 
         return forces_moments, R_grid, PSI_grid, alpha, dT, dH, dY
-
-
-
-    # def forward(self, forward_speed, theta0, theta1c, theta1s, alpha_tpp,
-    #             CT_guess=0.008, n_r=100, n_psi=100, tol_CT=1e-5, max_iter=50):
-        
-    #     # discretization
-    #     r = np.linspace(self.rc, self.r - 1e-6, n_r)
-    #     psi = np.linspace(0.0, 2.0 * np.pi, n_psi, endpoint=False)
-    
-    #     mu = forward_speed / (self.omega * self.r)  # dimensionless advance ratio
-    
-    #     # iterate for CT
-    #     CT = CT_guess
-    #     for iteration in range(max_iter):
-    #         # Glauert inflow
-    #         lambda_G, lambda_iG = self.calculate_glauert_lambda(mu, alpha_tpp, CT)
-    
-    #         # flapping angles
-    #         beta0, beta1c, beta1s = self.calculate_flapping_angles(theta0, theta1c, theta1s, mu, alpha_tpp)
-    
-    #         # lambda_i distribution
-    #         lambda_i = self.calculate_non_uniform_inflow(r, psi, mu, lambda_G, lambda_iG)
-    
-    #         # meshes
-    #         R_grid, PSI_grid = np.meshgrid(r, psi, indexing='ij')
-    
-    #         # velocities
-    #         UT = self.omega * R_grid + forward_speed * np.sin(PSI_grid)
-    #         beta_dot = self.omega * (-beta1c * np.sin(PSI_grid) + beta1s * np.cos(PSI_grid))
-    #         UP = (lambda_i * self.omega * self.r +
-    #               forward_speed * np.cos(PSI_grid) * np.cos(alpha_tpp) +
-    #               R_grid * beta_dot +
-    #               forward_speed * np.sin(beta0) * np.cos(PSI_grid))
-    
-    #         U_total = np.sqrt(UT**2 + UP**2)
-    #         phi = np.arctan2(UP, UT)
-    
-    #         twist_grid = np.array([self.cal_twist(rv) for rv in r])[:, np.newaxis]
-    #         theta_total = theta0 + theta1c * np.cos(PSI_grid) + theta1s * np.sin(PSI_grid) + twist_grid
-    #         alpha = theta_total - phi
-    
-    #         cl = self.cal_cl(alpha)
-    #         cd = self.cal_cd(alpha)
-    #         chord_grid = np.array([self.cal_chord(rv) for rv in r])[:, np.newaxis]
-    
-    #         dL = 0.5 * self.rho * U_total**2 * chord_grid * cl
-    #         dD = 0.5 * self.rho * U_total**2 * chord_grid * cd
-    
-    #         dT = dL * np.cos(phi) - dD * np.sin(phi)
-    #         dH = dL * np.sin(phi) + dD * np.cos(phi)
-    #         dY = dD * np.sin(PSI_grid)
-    
-    #         # integrate
-    #         T_blade = self.integrate_2d(r, psi, dT)
-    
-    #         # update CT
-    #         CT_new = T_blade / (self.rho * np.pi * self.r**2 * (self.omega * self.r)**2)
-    #         if abs(CT_new - CT) < tol_CT:
-    #             CT = CT_new
-    #             break
-    #         CT = CT_new
-    
-    #     # After convergence, compute all final forces/moments
-    #     Q_blade = self.integrate_2d(r, psi, R_grid * dD)
-    #     Mx_blade = self.integrate_2d(r, psi, R_grid * dT * np.sin(PSI_grid))
-    #     My_blade = self.integrate_2d(r, psi, R_grid * dT * np.cos(PSI_grid))
-    #     H_blade = self.integrate_2d(r, psi, dH)
-    #     Y_blade = self.integrate_2d(r, psi, dY)
-    
-    #     forces_moments = {
-    #         'FZ': self.b * T_blade,
-    #         'FX': -self.b * H_blade,
-    #         'FY': -self.b * Y_blade,
-    #         'MX': self.b * Mx_blade,
-    #         'MY': self.b * My_blade,
-    #         'MZ': self.b * Q_blade,
-    #         'power': self.b * Q_blade * self.omega,
-    #         'mu': mu,
-    #         'lambda_G': lambda_G,
-    #         'lambda_iG': lambda_iG,
-    #         'lambda_i_distribution': lambda_i,
-    #         'beta0': beta0,
-    #         'beta1c': beta1c,
-    #         'beta1s': beta1s,
-    #         'CT': CT
-    #     }
-    
-    #     return forces_moments, R_grid, PSI_grid, alpha, dT, dH, dY
-
 
 

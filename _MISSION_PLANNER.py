@@ -1,161 +1,259 @@
 import numpy as np
+import matplotlib.pyplot as plt
+
 class MissionPlanner:
-    def __init__(self, rotor, engine_power_kw=1000, sfc=1.389e-4):
-        """
-        @param rotor: rotor object (defined by user)
-        @param engine_power_kw: Maximum engine shaft power available [kW]
-        @param sfc: Specific fuel consumption [kg/kW-s]
-        """
-        self.rotor = rotor
+    def __init__(self, helicopter, engine_power_kw=1800, sfc=1.389e-4):
+        self.helicopter = helicopter
+        self.main_rotor = helicopter.main_rotor
+        self.tail_rotor = helicopter.tail_rotor
         self.engine_power_kw = engine_power_kw
         self.sfc = sfc
-        self.mission_log = []
         
-        # Mission state
         self.takeoff_weight = None
         self.fuel_weight = None
-        self.altitude = None
-        self.gross_weight = None
+        self.current_weight = None
+        self.altitude = 0
 
-    def mission_inputs(self, takeoff_weight, fuel_weight, altitude):
-        """
-        Set initial mission conditions.
-        """
+        self.reset_logs()
+
+    # ============================================================
+    # Initialization and utilities
+    # ============================================================
+    def reset_logs(self):
+        self.time_log = []
+        self.fuel_log = []
+        self.weight_log = []
+        self.alt_log = []
+        self.power_log = []
+        self.speed_log = []
+        self.climb_log = []
+        self.dist_log = []
+        self.seg_log = []
+        self.fuel_burn_log = []
+        self._time = 0.0
+        self._dist = 0.0
+
+    def initialize(self, takeoff_weight, fuel_weight, initial_altitude=0):
         self.takeoff_weight = takeoff_weight
         self.fuel_weight = fuel_weight
-        self.gross_weight = takeoff_weight
-        self.altitude = altitude
-        self.rotor.atmosphere(altitude)
-        self.log_event(f"Mission initialized at {altitude} m with weight {takeoff_weight} kg")
-
-    def log_event(self, message):
-        self.mission_log.append(message)
-        print(message)
-
-    def power_required_hover(self, climb_rate=0.0):
-        """
-        Estimate hover/vertical climb power required using BEMT.
-        """
-        _, _, _, _, thrust, _, _, _, torque = self.rotor.bemt(climb_rate)
-        weight_N = self.gross_weight * 9.81
-        if thrust < weight_N:
-            self.log_event("WARNING: Rotor thrust insufficient for hover at this weight!")
-        power_req = torque * self.rotor.omega/1000
-        return power_req
-
-    def fuel_burn(self, power_kw, duration_s, eff=0.9):
-        """
-        Compute fuel burned using SFC in kg/kW-s.
-        Accounts for mechanical/transmission efficiency.
+        self.current_weight = takeoff_weight
+        self.altitude = initial_altitude
         
-        @param power_kw: shaft power required [kW]
-        @param duration_s: segment duration [s]
-        @param eff: efficiency (fraction of fuel power that reaches rotor), default = 0.9
-        """
-        # Effective fuel power must be higher due to losses
-        fuel_used = (power_kw / eff) * self.sfc * duration_s
+        self.main_rotor.atmosphere(initial_altitude)
+        self.tail_rotor.atmosphere(initial_altitude)
+        
+        self.reset_logs()
+        print(f"\nMission Start: Weight={takeoff_weight:.1f} kg | Fuel={fuel_weight:.1f} kg | Alt={initial_altitude:.0f} m")
+
+    def burn_fuel(self, power_kw, duration_s):
+        fuel_used = power_kw * self.sfc * duration_s
         self.fuel_weight -= fuel_used
-        self.gross_weight -= fuel_used
-        if self.fuel_weight < 0:
-            self.log_event("WARNING: Fuel exhausted!")
+        self.current_weight -= fuel_used
         return fuel_used
 
+    def log_segment(self, duration_s, power_kw, velocity=0.0, climb_rate=0.0, segment=""):
+        """Log only one entry per segment."""
+        self._time += duration_s
+        self._dist += velocity * duration_s
+        self.time_log.append(self._time)
+        self.fuel_log.append(self.fuel_weight)
+        self.weight_log.append(self.current_weight)
+        self.alt_log.append(self.altitude)
+        self.power_log.append(power_kw)
+        self.speed_log.append(velocity)
+        self.climb_log.append(climb_rate)
+        self.dist_log.append(self._dist / 1000)  # in km
+        self.seg_log.append(segment)
+        self.fuel_burn_log.append(power_kw * self.sfc)  
 
-    def segment_hover(self, duration_s=300, climb_rate=0.0):
+
+    # ============================================================
+    # Hover
+    # ============================================================
+    def hover(self, duration_s):
+        print(f"\n--- Hover: {duration_s:.0f}s ---")
+        _, _, _, _, thrust, _, _, _, torque = self.main_rotor.bemt(0.0)
+        power_main = torque * self.main_rotor.omega / 1000
+        power_tail = 0.1 * power_main
+        power_total = power_main + power_tail
+        
+        print(f"  Power: {power_total:.1f} kW")
+
+        if power_total > self.engine_power_kw:
+            print(f"  ❌ ABORT: Power {power_total:.1f} > {self.engine_power_kw:.1f} kW")
+            return False
+        
+        fuel_used = self.burn_fuel(power_total, duration_s)
+        print(f"  Fuel used: {fuel_used:.2f} kg | Remaining: {self.fuel_weight:.1f} kg")
+        self.log_segment(duration_s, power_total, segment="Hover")
+        return self.fuel_weight > 0
+
+    # ============================================================
+    # Climb
+    # ============================================================
+    def climb(self, height_m, climb_rate):
+        duration_s = height_m / climb_rate
+        print(f"\n--- Climb: {height_m:.0f} m @ {climb_rate:.1f} m/s ---")
+
+        self.altitude += height_m
+        self.main_rotor.atmosphere(self.altitude)
+        self.tail_rotor.atmosphere(self.altitude)
+
+        _, _, _, _, thrust, _, _, _, torque = self.main_rotor.bemt(climb_rate)
+        power_main = torque * self.main_rotor.omega / 1000
+        power_tail = 0.1 * power_main
+        power_total = power_main + power_tail
+
+        print(f"  Power: {power_total:.1f} kW | New Alt: {self.altitude:.0f} m")
+
+        if power_total > self.engine_power_kw:
+            print(f"  ❌ ABORT: Power {power_total:.1f} > {self.engine_power_kw:.1f} kW")
+            return False
+
+        fuel_used = self.burn_fuel(power_total, duration_s)
+        print(f"  Fuel used: {fuel_used:.2f} kg | Remaining: {self.fuel_weight:.1f} kg")
+        self.log_segment(duration_s, power_total, climb_rate=climb_rate, segment="Climb")
+        return self.fuel_weight > 0
+
+    # ============================================================
+    # Forward Flight
+    # ============================================================
+    def forward_flight(self, velocity, distance_m, alpha_tpp=0.05, drag_coeff=2.14):
+        duration_s = distance_m / velocity
+        print(f"\n--- Forward Flight: {distance_m/1000:.1f} km @ {velocity:.1f} m/s ---")
+
+        self.helicopter.weight = self.current_weight * 9.81
+        drag = drag_coeff * velocity**2
+        trim = self.helicopter.find_trim(velocity=velocity, alpha_tpp=alpha_tpp, Drag=drag)
+
+        theta0, theta1c, theta1s, theta0_tail = trim['theta0'], trim['theta1c'], trim['theta1s'], trim['theta0_tail']
+        print(f"  Trim: θ0={theta0:.3f}, θ1c={theta1c:.3f}, θ1s={theta1s:.3f}, θ_tail={theta0_tail:.3f}")
+
+        forces_moments, *_ = self.main_rotor.forward(
+            forward_speed=velocity,
+            theta0=theta0,
+            theta1c=theta1c,
+            theta1s=theta1s,
+            alpha_tpp=alpha_tpp
+        )
+
+        MZ = forces_moments['MZ']
+        power_main = abs(MZ) * self.main_rotor.omega / 1000.0
+        power_tail = 0.1 * power_main
+        power_total = power_main + power_tail
+
+        print(f"  Power: {power_total:.1f} kW | Duration: {duration_s/60:.1f} min")
+
+        if power_total > self.engine_power_kw:
+            print(f"  ❌ ABORT: Power {power_total:.1f} > {self.engine_power_kw:.1f} kW")
+            return False
+
+        fuel_used = self.burn_fuel(power_total, duration_s)
+        print(f"  Fuel used: {fuel_used:.2f} kg | Remaining: {self.fuel_weight:.1f} kg")
+
+        self.log_segment(duration_s, power_total, velocity=velocity, segment="Cruise")
+        return self.fuel_weight > 0
+
+    # ============================================================
+    # Mission Execution
+    # ============================================================
+    def execute_mission(self, segments):
+        print(f"\n{'='*60}\nMISSION EXECUTION\n{'='*60}")
+        for seg in segments:
+            t = seg['type']
+            if t == 'hover':
+                success = self.hover(seg['duration_s'])
+            elif t == 'climb':
+                success = self.climb(seg['height_m'], seg['climb_rate'])
+            elif t == 'forward':
+                success = self.forward_flight(seg['velocity'], seg['distance_m'])
+            else:
+                print(f"Unknown segment type: {t}")
+                continue
+            if not success:
+                print("\n❌ MISSION ABORTED\n" + "="*60)
+                return
+        print("\n✅ MISSION COMPLETED\n" + "="*60)
+        print(f"Final Fuel: {self.fuel_weight:.1f} kg")
+
+    # ============================================================
+    # Plotting
+    # ============================================================
+    def plot_results(self, mission_name="Mission", mission_segments=None):
         """
-        Hover or vertical climb segment.
-        @param duration_s: duration in seconds
+        Plot each performance metric in a separate figure window.
+        Add labeled markers A, B, C, ... for each segment boundary,
+        and a summary box listing segment descriptions (e.g., A–B: Hover 120 s).
         """
-        P_req = self.power_required_hover(climb_rate)
-        P_avail = self.engine_power_kw
-        if P_req > P_avail:
-            self.log_event("WARNING: Engine power insufficient for hover!")
-        fuel_used = self.fuel_burn(P_req, duration_s)
-        self.log_event(f"Hover/Climb {duration_s:.0f} s @ {climb_rate:.1f} m/s | "
-                       f"Power req = {P_req:.1f} kW | Fuel used = {fuel_used:.4f} kg")
+        time_min = np.array(self.time_log) / 60
 
-    def segment_payload(self, payload_change):
-        """
-        Pickup (+) or drop (-) payload.
-        """
-        self.gross_weight += payload_change
-        self.log_event(f"Payload change: {payload_change:+.1f} kg | New gross weight = {self.gross_weight:.1f} kg")
+        # Compute segment durations to get boundary times
+        seg_durations_s = []
+        for seg in mission_segments:
+            if seg["type"] == "hover":
+                seg_durations_s.append(seg["duration_s"])
+            elif seg["type"] == "climb":
+                seg_durations_s.append(seg["height_m"] / seg["climb_rate"])
+            elif seg["type"] == "forward":
+                seg_durations_s.append(seg["distance_m"] / seg["velocity"])
 
-    def report(self):
-        """
-        Print mission summary.
-        """
-        print("\n--- Mission Summary ---")
-        for log in self.mission_log:
-            print(log)
+        seg_boundaries = [0]
+        for d in seg_durations_s:
+            seg_boundaries.append(seg_boundaries[-1] + d / 60.0)  # in minutes
+        seg_labels = [chr(65 + i) for i in range(len(seg_boundaries))]  # A, B, C, ...
 
-    def helicopter_performance(x, weight, fuel_weight, eta_p=0.8, P_avail=745.7*8000):
-        """
-        Compute stall-limited, power-limited, range-max, and endurance-max speeds and outputs.
+        # Prepare segment descriptions for legend box
+        seg_texts = []
+        for i, seg in enumerate(mission_segments):
+            start_label, end_label = seg_labels[i], seg_labels[i + 1]
+            if seg["type"] == "hover":
+                desc = f"{start_label}–{end_label}: Hover {seg['duration_s']} s"
+            elif seg["type"] == "climb":
+                desc = f"{start_label}–{end_label}: Climb {seg['height_m']} m @ {seg['climb_rate']} m/s"
+            elif seg["type"] == "forward":
+                desc = f"{start_label}–{end_label}: Forward {seg['distance_m']/1000:.0f} km @ {seg['velocity']} m/s"
+            seg_texts.append(desc)
 
-        Parameters
-        ----------
-        x : rotor() instance
-            Rotor class with thrust_power(V, alpha) defined.
-        weight : float
-            Gross weight of helicopter [N].
-        fuel_weight : float
-            Fuel weight [kg].
-        eta_p : float
-            Propulsive efficiency (default 0.8)
-        P_avail : float
-            Available engine power [W].
+        # Quantities to plot
+        plots = [
+            ("Gross Weight [kg]", self.weight_log),
+            ("Fuel Weight [kg]", self.fuel_log),
+            ("Total Power Required [kW]", self.power_log),
+            ("Speed [m/s]", self.speed_log),
+            ("Altitude [m]", self.alt_log),
+            ("Distance [km]", self.dist_log),
+            ("Climb Rate [m/s]", self.climb_log),
+            ("Fuel Burn Rate [kg/s]", self.fuel_burn_log)
+        ]
 
-        Returns
-        -------
-        dict with:
-        V_stall : m/s
-        V_max_power : m/s
-        range_max : km
-        endurance_max : hr
-        """
-        rho = x.rho
-        A = np.pi * x.radius**2
+        # Plot each quantity separately
+        for title, data in plots:
+            plt.figure(figsize=(8, 5))
+            plt.plot(time_min, data, 'o-', lw=2, color='steelblue', markerfacecolor='orange')
+            plt.title(f"{title}", fontsize=13, fontweight="bold")
+            plt.xlabel("Time [min]")
+            plt.grid(True)
 
-        alpha_stall = np.deg2rad(18)
-        mu_values = np.linspace(0.01, 0.4, 100)
-        V_values = mu_values * x.omega * x.radius
+            # ✅ Add horizontal line at 1500 kW only for the total power plot
+            if "Power" in title:
+                plt.axhline(1500, color='red', linestyle='--', linewidth=2, label='Engine Limit (1500 kW)')
+                plt.legend(loc='best')
 
-        alpha_values = []
-        for mu in mu_values:
-            _, _, _, _, _, _, _, alpha_tpp, _, _ = x.thrust_power(mu)
-            alpha_values.append(alpha_tpp)
-        alpha_values = np.array(alpha_values)
 
-        # find where stall reached
-        stall_idx = np.where(alpha_values >= alpha_stall)[0]
-        if len(stall_idx) > 0:
-            V_stall = V_values[stall_idx[0]]
-        else:
-            V_stall = V_values[-1]
+            # Add markers A, B, C... at segment boundaries
+            y_min, y_max = plt.ylim()
+            for i, t in enumerate(seg_boundaries):
+                y_pos = y_min + 0.02 * (y_max - y_min)
+                plt.text(t, y_pos, seg_labels[i], fontsize=10, fontweight='bold',
+                         ha='center', va='bottom', color='darkred',
+                         bbox=dict(boxstyle="circle,pad=0.3", facecolor='white', edgecolor='darkred'))
 
-        def power_required(V):
-            T, P = x.thrust_power(V / (x.omega * x.radius))
-            return P
+            # Add mission summary box in top-right
+            box_text = f"{mission_name}\n" + "\n".join(seg_texts)
+            plt.text(0.98, 0.98, box_text,
+                     transform=plt.gca().transAxes,
+                     fontsize=9, ha='right', va='top', color='black',
+                     bbox=dict(boxstyle="round,pad=0.4", facecolor="whitesmoke", edgecolor="gray"))
 
-        V_test = np.linspace(0, 120, 300)
-        P_req = np.array([power_required(V) for V in V_test])
-        idx = np.where(P_req < P_avail)[0]
-        V_max_power = V_test[idx[-1]] if len(idx) > 0 else 0
-
-        # Range ∝ η * (W_fuel/W) * (L/D)_max
-        # Approx: (L/D)_max ≈ (T/W) at minimum power required
-        i_min = np.argmin(P_req)
-        T_min, P_min = x.thrust_power(V_test[i_min] / (x.omega * x.radius))
-        LD_max = T_min / weight
-        range_max = eta_p * (fuel_weight * 9.81 / weight) * LD_max * 3.6e3  # m → km
-
-        # Endurance ∝ (η / P_min) * (W_fuel)
-        endurance_max = eta_p * (fuel_weight * 9.81) / P_min / 3600  # sec → hr
-
-        return {
-            "V_stall": V_stall,
-            "V_max_power": V_max_power,
-            "range_max": range_max,
-            "endurance_max": endurance_max
-        }
+            plt.tight_layout()
+            plt.show()

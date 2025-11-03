@@ -78,7 +78,9 @@ class helicopter:
 
     def calculate_total_forces(self,velocity, theta0, theta1c, theta1s, alpha_tpp, theta0_tail):
         main_rotor = self.main_rotor.forward(velocity, theta0, theta1c, theta1s, alpha_tpp)[0]   
-        tail_rotor = self.tail_rotor.forward(velocity, theta0_tail, 0, 0, 0)[0]
+        tail_rotor = self.tail_rotor.forward(velocity, theta0_tail, 0, 0, 0)[0]   ### extracting the dict from all the things returned 
+        
+        ### converting from tail rotor frame to body frame 
         tail_rotor['FY'], tail_rotor['FZ'] = -tail_rotor['FZ'], tail_rotor['FY'] 
         tail_rotor['MY'], tail_rotor['MZ'] = -tail_rotor['MZ'], tail_rotor['MY']
 
@@ -105,6 +107,7 @@ class helicopter:
             force += F
             moment += M
 
+        ### lever arm moment
         moment += np.cross(self.main_pos - self.ref_point,np.array([main_rotor['FX'], main_rotor['FY'], main_rotor['FZ']]))
         moment += np.cross(self.tail_pos - self.ref_point,np.array([tail_rotor['FX'], tail_rotor['FY'], tail_rotor['FZ']]))
         
